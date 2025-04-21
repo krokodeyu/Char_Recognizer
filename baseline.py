@@ -236,27 +236,29 @@ class DigitsDataset(Dataset):
                 self.width = random.choice(range(224, 256, 16))
 
         self.batch_count += 1
-        return t.stack(imgs).float(), t.stack(labels) 
+        return t.stack(imgs).float(), t.stack(labels)
 
-class DigitsResnet50(nn.Module):
-    def __init__(self, class_num=11):
-        super(DigitsResnet50, self).__init__()
-        self.net = resnet50(pretrained=True)
-        self.net = nn.Sequential(*list(self.net.children())[:-1]) 
-        self.cnn = self.net
-        self.fc1 = nn.Linear(2048, class_num)
-        self.fc2 = nn.Linear(2048, class_num)
-        self.fc3 = nn.Linear(2048, class_num)
-        self.fc4 = nn.Linear(2048, class_num)
 
-    def forward(self, img):
-        feat = self.cnn(img)
-        feat = feat.view(feat.shape[0], -1)
-        c1 = self.fc1(feat)
-        c2 = self.fc2(feat)
-        c3 = self.fc3(feat)
-        c4 = self.fc4(feat)
-        return c1, c2, c3, c4
+class DigitsResnetLSTM(nn.Module):
+    def __init__(self, class_num=11, max_len=4):
+        super().__init__()
+        self.max_len = max_len
+        self.class_num = class_num
+
+        from torchvision.models import resnet50
+        backbone = resnet50(pretrained=True)
+        self.feature_extractor = nn.Sequential(*list(backbone.children())[:-1])  # [B, 2048, 1, 1]
+
+        self.lstm = nn.LSTM(input_size=2048, hidden_size=512, num_layers=2, batch_first=True)
+        self.classifier = nn.Linear(512, class_num)
+
+    def forward(self, x):
+        batch_size = x.size(0)
+        feat = self.feature_extractor(x).view(batch_size, -1)
+        repeated_feat = feat.unsqueeze(1).repeat(1, self.max_len, 1)
+        out, _ = self.lstm(repeated_feat)
+        logits = self.classifier(out)
+        return [logits[:, i, :] for i in range(self.max_len)]
 
 
 class LabelSmoothEntropy(nn.Module):
@@ -295,7 +297,7 @@ class Trainer:
         else:
             self.val_loader = None
 
-        self.model = DigitsResnet50(config.class_num).to(self.device)
+        self.model = DigitsResnetLSTM(config.class_num).to(self.device)
         self.criterion = LabelSmoothEntropy().to(self.device)
         self.optimizer = Adam(self.model.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0,
                               amsgrad=False)
@@ -436,7 +438,7 @@ def predicts(model_path,csv_path):
                     num_workers=8, pin_memory=True, drop_last=False,persistent_workers=True)
     results = []
     res_path = model_path
-    res_net = DigitsResnet50().cuda()
+    res_net = DigitsResnetLSTM().cuda()
     res_net.load_state_dict(t.load(res_path)['model'])
     print('Load model from %s successfully'%model_path)
     tbar = tqdm(test_loader)
